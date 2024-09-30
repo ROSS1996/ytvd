@@ -43,8 +43,8 @@ The YouTube Video Downloader consists of two main components:
 1. Clone this repository:
 
    ```bash
-   git clone https://github.com/yourusername/youtube-video-downloader.git
-   cd youtube-video-downloader/backend
+   git clone https://github.com/yourusername/ytvd.git
+   cd ytvd/backend
    ```
 
 2. Install the required dependencies:
@@ -66,7 +66,7 @@ The YouTube Video Downloader consists of two main components:
 1. Navigate to the `browser_extension` directory:
 
    ```bash
-   cd youtube-video-downloader/browser_extension
+   cd ytvd/browser_extension
    ```
 
 2. Follow the browser-specific instructions to load the extension:
