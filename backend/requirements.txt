@@ -4,5 +4,5 @@ Flask
 colorama
 rich
 pyqt6
-pyqt6-webengine
+PyQt6-WebEngine
 eyed3
