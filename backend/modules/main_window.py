@@ -54,17 +54,21 @@ class DownloadManagerHandler:
 
     def request_download(self, youtube_url, format_type, quality):
         """Pergunta ao usuário por confirmação antes de iniciar o download."""
-        reply = QMessageBox.question(
-            self.parent,
-            f'Confirmação de Download {format_type.capitalize()}',
-            f'Você deseja baixar este {format_type}?\n{youtube_url}',
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
-        if reply == QMessageBox.StandardButton.Yes:
+        # Cria a mensagem de confirmação
+        msg_box = QMessageBox(self.parent)
+        msg_box.setWindowTitle(f'Confirmação de Download {format_type.capitalize()}')
+        msg_box.setText(f'Você deseja baixar este {format_type}?\n{youtube_url}')
+        
+        # Define os botões com textos personalizados
+        btn_sim = msg_box.addButton('Sim', QMessageBox.ButtonRole.YesRole)
+        btn_nao = msg_box.addButton('Não', QMessageBox.ButtonRole.NoRole)
+        
+        # Exibe a caixa de diálogo
+        msg_box.exec()
+
+        # Verifica a resposta do usuário
+        if msg_box.clickedButton() == btn_sim:
             self.parent.start_download(youtube_url, format_type, quality)
-
-
 class BrowserWindow(QMainWindow):
     """Janela Principal do Navegador com recursos de download de vídeos do YouTube."""
 
