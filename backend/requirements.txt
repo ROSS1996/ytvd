@@ -3,3 +3,6 @@ flask-cors
 Flask
 colorama
 rich
+pyqt6
+pyqt6-webengine
+eyed3
