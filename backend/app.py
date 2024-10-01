@@ -6,19 +6,19 @@ from modules.download_manager import DownloadManager
 from modules.main_window import BrowserWindow
 
 def main():
-    # Create the application instance
+    # Cria a instância da aplicação
     app = QApplication(sys.argv)
 
-    # Check internet connection before launching the application
+    # Verifica a conexão com a internet antes de iniciar a aplicação
     if not DownloadManager.is_internet_connected():
-        QMessageBox.critical(None, "No Internet Connection", "You are not connected to the internet.")
-        return  # Exit if no internet connection
+        QMessageBox.critical(None, "Sem Conexão com a Internet", "Você não está conectado à internet.")
+        return  # Sai se não houver conexão com a internet
 
-    # Create and show the main application window
+    # Cria e mostra a janela principal da aplicação
     window = BrowserWindow()
-    window.showMaximized()  # Use showMaximized() here
+    window.showMaximized()  # Usa showMaximized() aqui
 
-    # Start the event loop
+    # Inicia o loop de eventos
     sys.exit(app.exec())
 
 if __name__ == '__main__':

@@ -8,31 +8,31 @@ class RichConsole:
         self.console = Console()
 
     def print_info(self, message):
-        """Prints an info message in blue."""
+        """Imprime uma mensagem de informação em azul."""
         self.console.print(f"[bold blue]{message}[/bold blue]")
 
     def print_warning(self, message):
-        """Prints a warning message in yellow."""
+        """Imprime uma mensagem de aviso em amarelo."""
         self.console.print(f"[bold yellow]{message}[/bold yellow]")
 
     def print_error(self, message):
-        """Prints an error message in red."""
+        """Imprime uma mensagem de erro em vermelho."""
         self.console.print(f"[bold red]{message}[/bold red]")
 
     def print_success(self, message):
-        """Prints a success message in green."""
+        """Imprime uma mensagem de sucesso em verde."""
         self.console.print(f"[bold green]{message}[/bold green]")
 
     def start_progress(self, total):
-        """Starts a progress bar."""
+        """Inicia uma barra de progresso."""
         self.progress = Progress()
-        self.task = self.progress.add_task("Downloading...", total=total)
+        self.task = self.progress.add_task("Baixando...", total=total)
         self.progress.start()
 
     def update_progress(self, completed):
-        """Updates the progress bar."""
+        """Atualiza a barra de progresso."""
         self.progress.update(self.task, completed=completed)
 
     def stop_progress(self):
-        """Stops the progress bar."""
+        """Para a barra de progresso."""
         self.progress.stop()

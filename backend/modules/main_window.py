@@ -1,125 +1,145 @@
 import sys
-import re
-from PyQt6.QtWidgets import (QMainWindow, QVBoxLayout, QWidget, QPushButton, QLabel, 
-                             QMessageBox, QHBoxLayout, QComboBox, QProgressBar, QSizePolicy, QApplication)
-from PyQt6.QtCore import QUrl, QTimer, pyqtSlot
+from PyQt6.QtWidgets import (
+    QMainWindow, QVBoxLayout, QWidget, QPushButton, QLabel,
+    QMessageBox, QHBoxLayout, QComboBox, QProgressBar, QSizePolicy, QApplication
+)
+from PyQt6.QtCore import QUrl, QTimer, pyqtSlot, QThread, pyqtSignal, QObject
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtGui import QIcon, QFont
+from PyQt6.QtWebEngineCore import QWebEngineSettings, QWebEngineProfile
 from .custom_web_engine_page import CustomWebEnginePage
 from .download_manager import DownloadManager
+import asyncio
+from .constants import CACHE_DIRECTORY
+
+
+class DownloadWorker(QObject):
+    """Worker para gerenciar o download em uma thread separada."""
+    progress = pyqtSignal(int)
+    finished = pyqtSignal(str, bool)  # mensagem, é_erro
+
+    def __init__(self, download_manager, youtube_url, format_type, quality):
+        super().__init__()
+        self.download_manager = download_manager
+        self.youtube_url = youtube_url
+        self.format_type = format_type
+        self.quality = quality
+
+    def run(self):
+        """Lida com o processo de download."""
+        try:
+            response, status_code = self.download_manager.handle_download_request(
+                self.youtube_url, self.format_type, self.quality, self.update_progress
+            )
+            if status_code != 202:
+                message = response.get("error", "Falha no download!")
+                self.finished.emit(message, True)
+            else:
+                message = f"Download iniciado: {response['title']}"
+                self.finished.emit(message, False)
+        except Exception as e:
+            self.finished.emit(str(e), True)
+
+    def update_progress(self, percentage):
+        """Atualiza o sinal de progresso."""
+        self.progress.emit(percentage)
+
 
 class DownloadManagerHandler:
-    """Handles download requests and provides a confirmation dialog."""
-    
+    """Manipula solicitações de download e confirmações do usuário."""
+
     def __init__(self, download_manager, parent):
         self.download_manager = download_manager
         self.parent = parent
 
     def request_download(self, youtube_url, format_type, quality):
+        """Pergunta ao usuário por confirmação antes de iniciar o download."""
         reply = QMessageBox.question(
             self.parent,
-            f'Download {format_type.capitalize()} Confirmation',
-            f'Do you want to download this {format_type}?\n{youtube_url}',
+            f'Confirmação de Download {format_type.capitalize()}',
+            f'Você deseja baixar este {format_type}?\n{youtube_url}',
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
-
         if reply == QMessageBox.StandardButton.Yes:
-            response, status_code = self.download_manager.handle_download_request(
-                youtube_url, format_type, quality, self.parent.update_progress
-            )
-
-            if status_code == 202:  # Download started successfully
-                message = f"Download started: {response['title']}"
-                self.parent.show_download_status(message)
-            else:  # Error in starting the download
-                error_message = response.get("error", "Unknown error occurred.")
-                self.parent.show_download_status(error_message, is_error=True)
+            self.parent.start_download(youtube_url, format_type, quality)
 
 
 class BrowserWindow(QMainWindow):
+    """Janela Principal do Navegador com recursos de download de vídeos do YouTube."""
+
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("YouTube Browser with Download Options")
-        # Initialize the download manager
-        self.download_manager = DownloadManager()  # Make sure you have a DownloadManager defined somewhere
-        self.download_handler = DownloadManagerHandler(self.download_manager, self)  # Create the handler
+        self.setWindowTitle("YouTube")
+        self.download_manager = DownloadManager()
+        self.download_handler = DownloadManagerHandler(
+            self.download_manager, self)
+        self.download_thread = None
+        self.download_worker = None
 
-        # Get the screen geometry to set the window size
-        screen_geometry = QApplication.primaryScreen().availableGeometry()
-        margin = 20  # Set a margin for the window
-
-        # Calculate the size for the window
-        width = int(screen_geometry.width() * 0.7)  # 70% of available width
-        height = int(screen_geometry.height() * 0.7)  # 70% of available height
-
-        # Set the geometry with margin
-        self.setGeometry(
-            screen_geometry.x() + margin,   # Margin on the left
-            screen_geometry.y() + margin,   # Margin on the top
-            width,                           # Width
-            height                           # Height
-        )
-
-        self.home_url = "https://www.youtube.com"  # Set home URL
-
-        self.init_ui()
-        self.init_browser()
-        self.init_timer()
+        self.home_url = "https://www.youtube.com"
+        self.init_ui()  # Inicializa a interface do usuário apenas uma vez
+        self.init_timer()  # Move a inicialização do timer aqui
         self.apply_styles()
-
-        # Show the window maximized
         self.showMaximized()
 
     def init_ui(self):
-        main_layout = QVBoxLayout()
+        """Inicializa o layout e os widgets da interface do usuário."""
+        self.init_browser()  # Inicializa as configurações da visualização do navegador
+        self.setup_buttons()  # Agora você pode configurar os botões com segurança
+        self.setup_progress_bar()
+        self.setup_layouts()  # Agora é seguro configurar layouts
 
-        # URL bar layout
+    def setup_layouts(self):
+        """Configura o layout principal e a exibição da URL."""
+        main_layout = QVBoxLayout()
         url_layout = QHBoxLayout()
+
         self.url_label = QLabel("URL")
-        self.url_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.url_content = QLabel()
-        self.url_content.setWordWrap(False)
-        self.url_content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.url_content.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
         url_layout.addWidget(self.url_label)
         url_layout.addWidget(self.url_content)
 
-        self.browser_view = QWebEngineView(self)
-        self.progress_bar = QProgressBar()
-        self.download_video_button = QPushButton("Download Video")
-        self.download_audio_button = QPushButton("Download Audio")
+        main_layout.addLayout(url_layout)
+        main_layout.addWidget(self.browser_view)
+        main_layout.addLayout(self.setup_button_layout())
+        main_layout.addWidget(self.progress_bar)
+
+        central_widget = QWidget()
+        central_widget.setLayout(main_layout)
+        self.setCentralWidget(central_widget)
+
+    def setup_buttons(self):
+        """Inicializa os botões de navegação e download."""
+        self.back_button = self.create_nav_button(
+            "Voltar", "go-previous", self.browser_view.back)
+        self.forward_button = self.create_nav_button(
+            "Avançar", "go-next", self.browser_view.forward)
+        self.refresh_button = self.create_nav_button(
+            "Atualizar", "view-refresh", self.browser_view.reload)
+        self.home_button = self.create_nav_button(
+            "Início", "go-home", self.navigate_home)
+
+        self.download_video_button = self.create_download_button(
+            "Baixar Vídeo", self.handle_video_download_click)
+        self.download_audio_button = self.create_download_button(
+            "Baixar Áudio", self.handle_audio_download_click)
+
         self.quality_combo = QComboBox()
+        self.quality_combo.addItems(['720p', '1080p', '480p', '360p'])
 
-        # Navigation buttons
-        self.back_button = QPushButton("Voltar")
-        self.back_button.setIcon(QIcon.fromTheme("go-previous"))
-        self.forward_button = QPushButton("Avançar")
-        self.forward_button.setIcon(QIcon.fromTheme("go-next"))
-        self.refresh_button = QPushButton("Atualizar")
-        self.refresh_button.setIcon(QIcon.fromTheme("view-refresh"))
-        self.home_button = QPushButton("Início")
-        self.home_button.setIcon(QIcon.fromTheme("go-home"))
-
+    def setup_progress_bar(self):
+        """Configura a barra de progresso do download."""
+        self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("Progresso do Download: %p%")
 
-        self.download_video_button.setEnabled(False)
-        self.download_video_button.clicked.connect(self.handle_video_download_click)
-
-        self.download_audio_button.setEnabled(False)
-        self.download_audio_button.clicked.connect(self.handle_audio_download_click)
-
-        self.quality_combo.addItems(['720p', '1080p', '480p', '360p'])
-
-        # Connect navigation buttons
-        self.back_button.clicked.connect(self.browser_view.back)
-        self.forward_button.clicked.connect(self.browser_view.forward)
-        self.refresh_button.clicked.connect(self.browser_view.reload)
-        self.home_button.clicked.connect(self.navigate_home)
-
-        # Layout setup
+    def setup_button_layout(self):
+        """Configura o layout dos botões da janela."""
         button_layout = QHBoxLayout()
         button_layout.addWidget(self.back_button)
         button_layout.addWidget(self.forward_button)
@@ -128,76 +148,140 @@ class BrowserWindow(QMainWindow):
         button_layout.addWidget(self.download_video_button)
         button_layout.addWidget(self.download_audio_button)
         button_layout.addWidget(self.quality_combo)
+        return button_layout
 
-        main_layout.addLayout(url_layout)
-        main_layout.addWidget(self.browser_view)
-        main_layout.addLayout(button_layout)
-        main_layout.addWidget(self.progress_bar)
+    def create_nav_button(self, text, icon_name, slot):
+        """Método utilitário para criar um botão de navegação."""
+        button = QPushButton(text)
+        button.setIcon(QIcon.fromTheme(icon_name))
+        button.clicked.connect(slot)
+        return button
 
-        central_widget = QWidget()
-        central_widget.setLayout(main_layout)
-        self.setCentralWidget(central_widget)
+    def create_download_button(self, text, slot):
+        """Método utilitário para criar um botão de download."""
+        button = QPushButton(text)
+        button.setEnabled(False)
+        button.clicked.connect(slot)
+        return button
 
     def init_browser(self):
+        """Inicializa as configurações da visualização do navegador."""
+        self.browser_view = QWebEngineView(self)
+        profile = self.browser_view.page().profile()
+        cache_path = CACHE_DIRECTORY
+
+        profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.DiskHttpCache)
+        profile.setHttpCacheMaximumSize(
+            1024 * 1024 * 100)  # Tamanho do cache: 100 MB
+        profile.setCachePath(cache_path)
+
+        # Ativa a aceleração de hardware, rolagem suave e outros recursos
+        browser_settings = self.browser_view.settings()
+        browser_settings.setAttribute(
+            QWebEngineSettings.WebAttribute.WebGLEnabled, True)
+        browser_settings.setAttribute(
+            QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, True)
+        browser_settings.setAttribute(
+            QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+        browser_settings.setAttribute(
+            QWebEngineSettings.WebAttribute.PluginsEnabled, True)
+        browser_settings.setAttribute(
+            QWebEngineSettings.WebAttribute.FullScreenSupportEnabled, True)
+
         self.browser_view.setUrl(QUrl(self.home_url))
 
     def init_timer(self):
+        """Inicializa o timer de verificação da URL."""
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.check_url_periodically)
         self.timer.start(2000)
 
-    def resizeEvent(self, event):
-        # If the window is maximized, prevent any resize changes
-        if self.isMaximized():
-            self.setGeometry(self.geometry())  # Keep current geometry
-        super().resizeEvent(event)  # Call base class method
-
-    def set_window_title(self, title):
-        self.setWindowTitle(title)
-
-    def update_url_label(self, url):
-        self.url_content.setText(url)
-
-    def enable_download_buttons(self, enable):
-        self.download_video_button.setEnabled(enable)
-        self.download_audio_button.setEnabled(enable)
-
     def check_url_periodically(self):
+        """Verifica a URL atual e atualiza os estados dos botões de download."""
         current_url = self.browser_view.url().toString()
         self.update_url_label(current_url)
 
-        if re.match(r'^(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.?be/)[\w-]{11}$', current_url):
-            self.enable_download_buttons(True)
-        else:
-            self.enable_download_buttons(False)
-            self.set_window_title("YouTube Browser with Download Options")
+        is_youtube_url = current_url.startswith(
+            "https://www.youtube.com/watch?v=") or current_url.startswith("https://youtu.be/")
+        self.enable_download_buttons(is_youtube_url)
+        if not is_youtube_url:
+            self.setWindowTitle("YouTube")
+
+    def update_url_label(self, url):
+        """Atualiza o rótulo de exibição da URL."""
+        self.url_content.setText(url)
+
+    def enable_download_buttons(self, enable):
+        """Habilita ou desabilita os botões de download."""
+        self.download_video_button.setEnabled(enable)
+        self.download_audio_button.setEnabled(enable)
+
+    def start_download(self, youtube_url, format_type, quality):
+        """Inicia o download em uma thread separada."""
+        if self.download_thread:
+            self.terminate_download_thread()
+
+        self.download_thread = QThread()
+        self.download_worker = DownloadWorker(
+            self.download_manager, youtube_url, format_type, quality)
+        self.download_worker.moveToThread(self.download_thread)
+
+        self.download_thread.started.connect(self.download_worker.run)
+        self.download_worker.finished.connect(self.on_download_finished)
+        self.download_worker.progress.connect(self.update_progress)
+
+        self.download_thread.start()
+
+    def terminate_download_thread(self):
+        """Termina a thread de download se estiver em execução."""
+        if self.download_thread:
+            self.download_thread.quit()
+            self.download_thread.wait()
+
+    def on_download_finished(self, message, is_error):
+        """Lida com a conclusão do download."""
+        self.terminate_download_thread()
+        self.download_worker = None
+        self.show_download_status(message, is_error)
 
     def show_download_status(self, message, is_error=False):
+        """Exibe uma mensagem de status para o download."""
         if is_error:
-            QMessageBox.critical(self, "Download Error", message)
+            QMessageBox.critical(self, "Erro no Download", message)
         else:
-            QMessageBox.information(self, "Download Started", message)
+            QMessageBox.information(self, "Download Iniciado", message)
+
+    def closeEvent(self, event):
+        """Lida com a limpeza quando a janela é fechada."""
+        self.terminate_download_thread()
+        event.accept()
 
     @pyqtSlot()
     def handle_video_download_click(self):
+        """Handle the click event for downloading videos."""
         current_url = self.browser_view.url().toString()
-        quality = self.quality_combo.currentText().replace('p', '')
+        quality = self.quality_combo.currentText().replace(
+            'p', '')  # Remove 'p' to get numeric value
         self.download_handler.request_download(current_url, "video", quality)
 
     @pyqtSlot()
     def handle_audio_download_click(self):
+        """Handle the click event for downloading audio."""
         current_url = self.browser_view.url().toString()
         self.download_handler.request_download(current_url, "audio", "best")
 
     @pyqtSlot(int)
     def update_progress(self, percentage):
+        """Update the progress bar with the current download percentage."""
         self.progress_bar.setValue(percentage)
 
     @pyqtSlot()
     def navigate_home(self):
+        """Navigate back to the home URL."""
         self.browser_view.setUrl(QUrl(self.home_url))
 
     def apply_styles(self):
+        """Apply custom styles to the application."""
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #f0f0f0;
@@ -212,7 +296,6 @@ class BrowserWindow(QMainWindow):
                 border: none;
                 padding: 8px 16px;
                 text-align: center;
-                text-decoration: none;
                 font-size: 14px;
                 margin: 4px 2px;
                 border-radius: 4px;
@@ -233,34 +316,28 @@ class BrowserWindow(QMainWindow):
             QProgressBar {
                 border: 2px solid grey;
                 border-radius: 5px;
-                background-color: #e0e0e0;  /* Background color of the bar */
+                background-color: #e0e0e0;
                 text-align: center;
             }
             QProgressBar::chunk {
-                background-color: #4CAF50;  /* Fill color */
-                width: 20px;  /* Width of the chunk */
+                background-color: #4CAF50;
+                width: 20px;
             }
         """)
 
-        # Set a modern font
         font = QFont("Segoe UI", 10)
         self.setFont(font)
 
-        # Style specific widgets
-        self.url_label.setStyleSheet("""
-            background-color: white;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            padding: 5px;
-        """)
+        # Style URL labels
+        for widget in [self.url_label, self.url_content]:
+            widget.setStyleSheet("""
+                background-color: white;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                padding: 5px;
+            """)
 
-        self.url_content.setStyleSheet("""
-            background-color: white;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            padding: 5px;
-        """)
-
+        # Style download buttons
         self.download_video_button.setStyleSheet("""
             QPushButton {
                 background-color: #008CBA;
@@ -270,7 +347,6 @@ class BrowserWindow(QMainWindow):
                 color: #CCCCCC;
             }
         """)
-
         self.download_audio_button.setStyleSheet("""
             QPushButton {
                 background-color: #f44336;
@@ -296,7 +372,23 @@ class BrowserWindow(QMainWindow):
                 background-color: #C0C0C0;
             }
         """
-        self.back_button.setStyleSheet(nav_button_style)
-        self.forward_button.setStyleSheet(nav_button_style)
-        self.refresh_button.setStyleSheet(nav_button_style)
-        self.home_button.setStyleSheet(nav_button_style)
+        for button in [self.back_button, self.forward_button, self.refresh_button, self.home_button]:
+            button.setStyleSheet(nav_button_style)
+
+    def focusInEvent(self, event):
+        """Repaint browser view on focus in."""
+        self.browser_view.setVisible(False)
+        self.browser_view.setVisible(True)
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        """Hide browser view on focus out."""
+        self.browser_view.setVisible(False)
+        super().focusOutEvent(event)
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = BrowserWindow()
+    window.show()
+    sys.exit(app.exec())

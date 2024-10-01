@@ -13,14 +13,15 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, DownloadColumn, TransferSpeedColumn, TimeRemainingColumn
 from .constants import DOWNLOAD_DIRECTORY, OUTPUT_FORMATS, MAX_CONCURRENT_DOWNLOADS
 
-# Initialize Rich console
+# Inicializa o console Rich
 console = Console()
 
-# Create download directory if it doesn't exist
+# Cria o diretório de download se não existir
 os.makedirs(DOWNLOAD_DIRECTORY, exist_ok=True)
 
-# Regex for detecting YouTube videos
+# Regex para detectar vídeos do YouTube
 YOUTUBE_VIDEO_REGEX = r'^(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.?be/)[\w-]{11}$'
+
 
 class DownloadManager:
     def __init__(self):
@@ -30,47 +31,58 @@ class DownloadManager:
 
     @staticmethod
     def is_internet_connected() -> bool:
-        """Check if the internet is connected."""
+        """Verifica se a internet está conectada."""
         try:
-            socket.create_connection(("www.google.com", 80))
+            # Realiza uma rápida resolução DNS em vez de estabelecer uma conexão TCP
+            socket.gethostbyname("www.google.com")
             return True
-        except OSError:
+        except socket.gaierror:
             return False
 
     @staticmethod
     def sanitize_filename(filename: str) -> str:
-        """Sanitize a filename by removing illegal characters."""
+        """Sanitiza um nome de arquivo removendo caracteres ilegais."""
         reserved_chars_pattern = r'[<>:"/\\|?*]'
         return re.sub(r'_+', '_', re.sub(reserved_chars_pattern, '_', filename))
 
     @staticmethod
     def add_metadata_to_mp3(file_path: str, video_info: Dict[str, Any]):
-        """Add metadata to the downloaded MP3 file."""
+        """Adiciona metadados ao arquivo MP3 baixado."""
         try:
             audiofile = eyed3.load(file_path)
             if not audiofile or not audiofile.tag:
                 audiofile.initTag()
 
-            audiofile.tag.title = video_info.get("title", "Unknown Title")
-            audiofile.tag.artist = video_info.get("uploader", "Unknown Artist")
-            audiofile.tag.album = "YouTube Download"
+            audiofile.tag.title = video_info.get("title", "Título Desconhecido")
+            audiofile.tag.artist = video_info.get("uploader", "Artista Desconhecido")
+            audiofile.tag.album = "Download do YouTube"
             audiofile.tag.year = video_info.get("upload_date", "")[:4]
             audiofile.tag.comments.set(video_info.get("description", ""))
 
+            # Baixa a miniatura em uma thread separada
             thumbnail_url = video_info.get("thumbnail")
             if thumbnail_url:
-                response = requests.get(thumbnail_url)
-                if response.status_code == 200:
-                    audiofile.tag.images.set(3, response.content, "image/jpeg", "Album Cover")
+                threading.Thread(target=DownloadManager.download_thumbnail, args=(thumbnail_url, audiofile)).start()
 
             audiofile.tag.save()
-            console.print(Panel(f"[bold green]Metadata added to {file_path}[/bold green]"))
+            console.print(Panel(f"[bold green]Metadados adicionados a {file_path}[/bold green]"))
         except Exception as e:
-            console.print(Panel(f"[bold red]Error adding metadata to {file_path}: {e}[/bold red]"))
+            console.print(Panel(f"[bold red]Erro ao adicionar metadados a {file_path}: {e}[/bold red]"))
+
+    @staticmethod
+    def download_thumbnail(thumbnail_url: str, audiofile):
+        """Baixa a miniatura e a define para o arquivo de áudio."""
+        try:
+            response = requests.get(thumbnail_url, timeout=5)
+            if response.status_code == 200:
+                audiofile.tag.images.set(3, response.content, "image/jpeg", "Capa do Álbum")
+                audiofile.tag.save()
+        except Exception as e:
+            console.print(Panel(f"[bold red]Erro ao baixar a miniatura: {e}[/bold red]"))
 
     @staticmethod
     def extract_video_info(youtube_url: str) -> Dict[str, Any]:
-        """Extract video information from the provided YouTube URL."""
+        """Extrai informações do vídeo a partir da URL do YouTube fornecida."""
         try:
             with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
                 info = ydl.extract_info(youtube_url, download=False)
@@ -83,11 +95,11 @@ class DownloadManager:
                     "description": info.get("description")
                 }
         except Exception as e:
-            console.print(Panel(f"[bold red]Error extracting video info: {e}[/bold red]"))
+            console.print(Panel(f"[bold red]Erro ao extrair informações do vídeo: {e}[/bold red]"))
             return {}
 
     def get_download_options(self, title: str, is_audio: bool, quality: str = 'best') -> Dict[str, Any]:
-        """Get download options for YouTube video/audio."""
+        """Obtém opções de download para vídeo/áudio do YouTube."""
         file_extension = OUTPUT_FORMATS['audio'] if is_audio else OUTPUT_FORMATS['video']
         sanitized_title = self.sanitize_filename(title)
 
@@ -95,17 +107,18 @@ class DownloadManager:
             'outtmpl': os.path.join(DOWNLOAD_DIRECTORY, f"{sanitized_title}.%(ext)s"),
             'format': 'bestaudio[ext=m4a]/best[ext=mp3]' if is_audio else f'bestvideo[ext=mp4][height<={quality}]+bestaudio[ext=m4a]/best[ext=mp4][height<={quality}]/best',
             'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}] if is_audio else [],
+            'noplaylist': True  # Garantindo que apenas o vídeo único seja baixado
         }
 
         return options
 
     def are_downloads_active(self) -> bool:
-        """Check if there are any active downloads."""
+        """Verifica se há downloads ativos."""
         with self.lock:
             return len(self.active_downloads) > 0
 
     def download_media(self, youtube_url: str, title: str, is_audio: bool, quality: str, progress_callback):
-        """Download media from YouTube and update progress."""
+        """Baixa mídia do YouTube e atualiza o progresso."""
         download_opts = self.get_download_options(title, is_audio, quality)
 
         progress = Progress(
@@ -117,13 +130,18 @@ class DownloadManager:
             TimeRemainingColumn(),
         )
 
-        task = progress.add_task(f"[cyan]Downloading: {title}", total=100)
+        task = progress.add_task(f"[cyan]Baixando: {title}", total=100)
 
         def progress_hook(d):
             if d['status'] == 'downloading':
-                percentage = d.get('downloaded_bytes', 0) / (d.get('total_bytes', 1)) * 95  # Cap at 95%
-                progress.update(task, completed=int(percentage))
-                progress_callback(int(percentage))  # Update GUI progress
+                downloaded = d.get('downloaded_bytes', 0)
+                total = d.get('total_bytes', 1)
+
+                # Proteção contra divisão por zero
+                if total > 0:
+                    percentage = (downloaded / total) * 95  # Limite em 95%
+                    progress.update(task, completed=int(min(percentage, 95)))
+                    progress_callback(min(int(percentage), 95))  # Garantir que o valor do callback de progresso seja limitado a 95
 
         download_opts['progress_hooks'] = [progress_hook]
 
@@ -132,31 +150,36 @@ class DownloadManager:
                 with yt_dlp.YoutubeDL(download_opts) as ydl:
                     ydl.download([youtube_url])
 
-            # Perform post-download steps, like adding metadata
+            # Determina o caminho final do arquivo com base em ser áudio ou vídeo
+            final_file_path = os.path.join(DOWNLOAD_DIRECTORY, self.sanitize_filename(title))
             if is_audio:
-                final_file_path = os.path.join(DOWNLOAD_DIRECTORY, f"{self.sanitize_filename(title)}.mp3")
-                if os.path.exists(final_file_path + ".mp3"):
-                    os.rename(final_file_path + ".mp3", final_file_path)
+                final_file_path += ".mp3"
+            else:
+                final_file_path += ".mp4"  # Supondo que os arquivos de vídeo sejam salvos como .mp4
 
+            # Se o arquivo baixado for áudio, adicione metadados
+            if is_audio:
                 video_info = self.extract_video_info(youtube_url)
                 self.add_metadata_to_mp3(final_file_path, video_info)
-            
-            # Update the progress bar to 100% after all post-download tasks
-            progress_callback(100)
-            console.print(Panel(f"[bold green]Download and metadata completed: {title}[/bold green]"))
+
+            # Atualiza a barra de progresso para 100% após todas as tarefas pós-download
+            progress.update(task, completed=100)  # Define o progresso para 100%
+            progress_callback(100)  # Garantir que o valor do callback de progresso seja 100 agora
+
+            console.print(Panel(f"[bold green]Download concluído: {title}[/bold green]"))
 
         except Exception as e:
-            console.print(Panel(f"[bold red]Error during download: {str(e)}[/bold red]"))
+            console.print(Panel(f"[bold red]Erro durante o download: {str(e)}[/bold red]"))
         finally:
             with self.lock:
                 self.active_downloads.pop(youtube_url, None)
             self.process_download_queue()
 
     def handle_download_request(self, youtube_url: str, format_type: str, quality: str, progress_callback) -> tuple:
-        """Handle a download request."""
+        """Gerencia uma solicitação de download."""
         video_info = self.extract_video_info(youtube_url)
         if not video_info:
-            error_message = "Failed to extract video info. Please check the URL."
+            error_message = "Falha ao extrair informações do vídeo. Por favor, verifique a URL."
             console.print(Panel(f"[bold red]{error_message}[/bold red]"))
             return {"error": error_message}, 400
 
@@ -165,7 +188,7 @@ class DownloadManager:
         is_audio = format_type == "audio"
 
         if self.is_file_downloaded(sanitized_title, is_audio):
-            error_message = "File already downloaded."
+            error_message = "Arquivo já baixado."
             console.print(Panel(f"[bold yellow]{error_message}[/bold yellow]"))
             return {"error": error_message}, 409
 
@@ -173,16 +196,16 @@ class DownloadManager:
             if len(self.active_downloads) < MAX_CONCURRENT_DOWNLOADS:
                 self.active_downloads[youtube_url] = {"title": title, "status": "downloading"}
                 threading.Thread(target=self.download_media, args=(youtube_url, title, is_audio, quality, progress_callback)).start()
-                message = "Download started."
+                message = "Download iniciado."
             else:
                 self.download_queue.put((youtube_url, title, is_audio, quality))
-                message = "Download queued."
+                message = "Download na fila."
 
-            console.print(Panel(f"[bold blue]{message} Title: {title}[/bold blue]"))
+            console.print(Panel(f"[bold blue]{message} Título: {title}[/bold blue]"))
             return {"message": message, "title": title, "position": self.download_queue.qsize()}, 202
 
     def process_download_queue(self):
-        """Process the download queue if there are active slots available."""
+        """Processa a fila de downloads se houver slots ativos disponíveis."""
         if not self.download_queue.empty() and len(self.active_downloads) < MAX_CONCURRENT_DOWNLOADS:
             youtube_url, title, is_audio, quality = self.download_queue.get()
             with self.lock:
@@ -190,20 +213,20 @@ class DownloadManager:
             threading.Thread(target=self.download_media, args=(youtube_url, title, is_audio, quality)).start()
 
     def is_file_downloaded(self, title: str, is_audio: bool) -> bool:
-        """Check if a file has already been downloaded."""
+        """Verifica se um arquivo já foi baixado."""
         file_extension = OUTPUT_FORMATS['audio'] if is_audio else OUTPUT_FORMATS['video']
         return os.path.exists(os.path.join(DOWNLOAD_DIRECTORY, f"{title}.{file_extension}"))
 
     def cancel_download(self, youtube_url: str) -> tuple:
-        """Cancel an ongoing download or remove it from the queue."""
+        """Cancela um download em andamento ou o remove da fila."""
         with self.lock:
             if youtube_url in self.active_downloads:
                 self.active_downloads.pop(youtube_url, None)
                 self.process_download_queue()
-                message = "Download canceled successfully"
+                message = "Download cancelado com sucesso"
                 console.print(Panel(f"[bold green]{message}[/bold green]"))
                 return {"message": message}, 200
             else:
-                message = "No active download found with the provided URL."
+                message = "Nenhum download ativo encontrado com a URL fornecida."
                 console.print(Panel(f"[bold yellow]{message}[/bold yellow]"))
                 return {"error": message}, 404
